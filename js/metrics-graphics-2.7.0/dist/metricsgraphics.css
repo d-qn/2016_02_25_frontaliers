@@ -1,5 +1,5 @@
 body, h1, h2, h3, h4, h5, h6, .descr, td {
-   font-family: 'Open Sans', sans-serif;
+   font-family: 'Open Sans', sans-serif!important;
    background-color: white;
    font-size: 0.6em;
 }
