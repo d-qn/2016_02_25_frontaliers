@@ -1,0 +1,108 @@
+---
+title: "Cross border workers"
+author: "Duc-Quang Nguyen"
+date: "25 February 2016"
+output: html_document
+---
+
+
+```{r setup, message = F, warning = F, include=FALSE}
+library(swiTheme)
+library(swiMap)
+library(dplyr)
+require(rgdal)
+require(rgeos)
+library(maptools)
+```
+
+## Settings
+
+#### data files
+```{r}
+### FRONTALIER DATA
+statf.csv <- "data/px-x-0302010000_101.csv"
+## Extracted from stat-tab STATF, Q4 since 1996 until 2014
+
+### OVERALL JOB BY COMMUNE
+statent.csv <- "data/px-x-0602010000_102.csv"
+## Extracted from stat-tab STATENT, 2012 https://www.pxweb.bfs.admin.ch/Selection.aspx?px_language=de&px_db=px-x-0602010000_102&px_tableid=px-x-0602010000_102%5Cpx-x-0602010000_102.px&px_type=PX
+
+colorRange <- c(swi_spal[1], "#663333")
+```
+
+### Load and shape the data
+
+```{r}
+## 1 STATF
+statf.read <- read.csv(statf.csv, stringsAsFactors = F, check.names = F, sep = "\t", encoding = "latin1", skip = 1)
+
+## 1 b cleaning
+# discard fist column
+statf.read <- statf.read[,-1]
+# get only communes values
+idx.com <- grepl("^\\\u0085\\\u0085", statf.read[,1])
+statf <- statf.read[idx.com,]
+statf[,1]  <- gsub("^\\\u0085\\\u0085", "", statf[,1])
+# rename column
+colnames(statf)[1] <- 'Commune'
+
+
+## 2 STATENT
+statent.read <- read.csv(statent.csv, stringsAsFactors = F, check.names = F, 
+  sep = "\t", encoding = "latin1", skip = 1)
+
+## 2 b cleaning: split the column commune with id code and commnune name into 2 columns
+statent.read <- cbind(Année =  statent.read[,1], do.call(rbind, lapply(strsplit(statent.read[,2], "  "), function(i) data.frame(bfsid = i[1], name = i[2]))), emplois = statent.read[,3])
+statent.read <- statent.read %>% 
+  rename(Commune = name, Emplois = emplois) %>% 
+  select(Année, Commune, Emplois,  bfsid)
+statent.read$Commune <- as.character(statent.read$Commune)
+statent.read$bfsid <- as.numeric(as.character(statent.read$bfsid))
+
+
+## 3 MAP data load commune map shapefiles and transform it into a data.frame
+ch.shp <- readOGR(swiMap::getPathShp('CH'), "municipalities-without-lakes")
+ch.df <- formatShp(ch.shp)
+lake.df <- formatShp(readOGR(swiMap::getPathShp('CH'), layer = "lakes"))
+
+######### CHECK commune names match commune map names
+# get names and id from map
+bfsnName <- ch.df[!duplicated(ch.df$BFSNR),c('BFSNR', 'GEMNAME')]
+bfsnName <- bfsnName[order(bfsnName[,1]),]
+
+qf <- unique(statf[,1])
+qe <- unique(statent.read[,2])
+# get the index of statf communes not in statent
+idxna.1 <- which(is.na(match(qf, qe)))
+
+# get the communes historical mutation data from OFS !!!!!!!!!
+start <- as.Date("2013-01-01")
+data <- loadCommunesCHdata()
+mutations <- data[match(qf[idxna.1], data$GNAME),]
+# get the communes merged
+communes14to12 <- sapply(mutations$GINIMUT, function(id) {
+	dd <- data[which(data$GFINMUT == id),]
+	dd$GNAME
+})
+names(communes14to12) <- mutations$GNAME
+
+## complete STATENT DATA by creating communes in 2014 missing in 2012
+statent <- statent.read
+
+for(i in 1:length(communes14to12) ) {
+	sumEmplois <- sum(statent.read [which(statent.read$Commune %in% communes14to12[[i]]),'Emplois'], na.rm = T)
+	statent <- rbind(statent, data.frame(Année = 2013, Commune = names(communes14to12)[i], Emplois = sumEmplois,
+		bfsid = mutations[which(mutations$GNAME == names(communes14to12)[i]),'GBFSNR']))
+}
+
+# datawrapper export
+data <- data.frame(
+  id = statent[match(statf[,1], statent$Commune), 'bfsid'], 
+  name = statent[match(statf[,1], statent$Commune), 'Commune'],   
+  job = statent[match(statf[,1], statent$Commune), 'Emplois'],
+  frontaliers = statf[, ncol(statf)])
+data$pc <- (data$frontaliers / data$job) * 100
+
+write.csv(data, file = "input/dw_foreignersjob_commune.csv", row.names = F)
+```
+

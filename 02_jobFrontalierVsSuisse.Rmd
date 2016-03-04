@@ -1,0 +1,236 @@
+---
+title: "Job by nationality"
+author: "Duc-Quang Nguyen"
+date: "25 February 2016"
+output: html_document
+---
+
+## Data
+
+### Frontaliers job
+
+[Frontaliers stats](https://www.pxweb.bfs.admin.ch/Selection.aspx?px_language=fr&px_db=px-x-0302010000_108&px_tableid=px-x-0302010000_108%5Cpx-x-0302010000_108.px&px_type=PX)
+
+* Select
+  * Sexe total
+  * Canton Suisse
+  * Classe d'âge Total
+  * All jobs
+  * All timeframes
+* Saved as : px-x-0302010000_108.csv
+
+### ESPA
+
+[Page de l'OFS](http://www.bfs.admin.ch/bfs/portal/fr/index/themen/03/02/blank/data/03.html)
+* ESPA emplois [je-f-03.02.01.21.xls](http://www.bfs.admin.ch/bfs/portal/fr/index/themen/03/02/blank/data/03.Document.100755.xls)
+ 
+ 
+ * In Excel
+    * Remove header, footer and blanks rows
+    * Discard the rows with Total (row 24 onwards)
+    * Save as CSV, tab-delimted, UTF-8
+  * Shape the data by adding column: nationalité and values: "suisse", "étranger"    
+
+##
+
+[CITP-08](http://ec.europa.eu/eurostat/ramon/nomenclatures/index.cfm?TargetUrl=LST_NOM_DTL&StrNom=CL_ISCO08&StrLanguageCode=FR&IntPcKey=&StrLayoutCode=HIERARCHIC)
+
+```{r setup, message = F, warning = F, include=FALSE}
+library(swiTheme)
+library(swiRcharts)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(zoo)
+library(lubridate)
+library(shiny)
+```
+
+## Load data
+
+```{r}
+frontalier.file <- "data/px-x-0302010000_108.csv"
+espa.file <- "data/je-f-03.02.01.21_cleaned_shaped.csv"
+
+###		Load data and shape
+
+## frontaliers
+f.read <- read.csv(frontalier.file, sep = "\t", encoding = "latin1", 
+  stringsAsFactor = F, check.names = F, skip = 1)
+f.read <- f.read %>% select(-Sexe, -`Canton de travail`, -`Classe d'âge`)
+
+# make the data long
+frontaliers <- cbind(f.read %>% tidyr::gather(année, valeur, -`Grand groupe de profession`), nationalité = "frontalier")
+frontaliers <- frontaliers %>% rename(profession = `Grand groupe de profession`)
+# transform Q time to date
+frontaliers$année <- as.Date(as.yearqtr(frontaliers$année, format = "%YQ%q")) + months(3) -1
+
+## ESPA data
+e.read <- read.csv(espa.file, stringsAsFactor = F, check.names = F)
+# remove empty col
+e.read <- e.read[,-which(colnames(e.read) =="")]
+
+## Hack change the trimester colanmes to Q1, Q2, Q3 and Q4 after the year.
+ncolname <- ifelse(grepl("^I\\n", colnames(e.read)), 
+  paste0(gsub("^I\\n", "", colnames(e.read)), "Q1"),  colnames(e.read))
+ncolname <- ifelse(grepl("^II ?\\n", ncolname), 
+  paste0(gsub("^II ?\\n", "", ncolname), "Q2"),  ncolname)
+ncolname <- ifelse(grepl("^III\\n", ncolname), 
+  paste0(gsub("^III\\n", "", ncolname), "Q3"),  ncolname)
+ncolname <- ifelse(grepl("^IV\\n", ncolname), 
+  paste0(gsub("^IV\\n", "", ncolname), "Q4"),  ncolname)
+
+colnames(e.read) <- ncolname
+
+# make the data long
+espa <- do.call(rbind, by(e.read, e.read$nationalité, function(ee) {
+	cbind(ee %>% select(-nationalité) %>% tidyr::gather(année, valeur, -Total), nationalité = ee$nationalité[1])
+}))
+rownames(espa) <- NULL
+colnames(espa)[1] <- 'profession'
+
+# transform Q time to date
+espa$année <- as.Date(as.yearqtr(espa$année, format = "%YQ%q")) + months(3) -1
+
+### match both datasets profession and rename some professions
+frontaliers <- frontaliers[-which(frontaliers$profession == "Grand groupe de profession - Total"),]
+
+frontaliers2espa <- unique(frontaliers[,1])
+frontaliers2espa[! frontaliers2espa %in% unique(espa[,1])]
+
+frontaliers2espa <- 
+  c('Non attribuable', 
+    "Métiers de l\u0092'industrie et de l\u0092'artisanat",
+    "Employés de type administrati" )
+
+names(frontaliers2espa) <- 
+  c("Sans indication/ne sait pas", 
+    "Métiers de l’industrie et de l’artisanat", 
+    "Employés de type administratif")
+
+#match( frontaliers2espa, "Métiers de l\u0092'industrie et de l\u0092'artisanat")
+
+idx <- match(frontaliers[,1], frontaliers2espa)
+frontaliers[which(!is.na(idx)),1] <- names(frontaliers2espa)[na.omit(idx)] 
+frontaliers[,1] <- gsub("\\\u0092", "’", frontaliers[,1])
+
+stopifnot(frontaliers[,1] %in% espa[,1])
+
+## rbind
+espa$valeur <- as.numeric(espa$valeur)
+espa[which(is.na(espa$valeur)), "valeur"] <- 0
+espa$valeur  <- espa$valeur * 1000
+data <- rbind(frontaliers, espa)
+
+############################################################################################
+###		Mine
+############################################################################################
+
+library(metricsgraphics)
+library(htmltools)
+
+### Jobs by nationality ###
+data <- data %>% group_by(année, nationalité) %>% mutate(perc = (valeur / sum(valeur)) * 100) %>% 
+  ungroup() %>% filter(profession != "Sans indication/ne sait pas" )
+
+#pdfswi_long("profession_lines.pdf")
+ggplot(data = data , aes(x = année, y = perc, group = nationalité, color = nationalité)) +
+	geom_line(size = 0.5, alpha = 0.8) + facet_wrap(~ profession, ncol = 3, scales = "free_x") + theme_swi() +
+  theme(legend.position = "top") + ylab("Profession %")
+#dev.off()
+
+dd <- data %>% filter(année >= as.Date("1999-03-31"))
+dd %<>% group_by(profession, nationalité) %>% mutate(year = as.numeric(format(année, "%Y"))) %>% ungroup()
+
+ddd <- dd %>% group_by(profession, year, nationalité) %>% dplyr::summarise(percy = last(perc)) %>% ungroup() %>% tidyr::spread(nationalité, percy)            
+#ddd$year <- as.Date(paste0(ddd$year, "-12-31"))
+
+p2 <- lapply(unique(ddd$profession), function(p) {
+  mjs_plot(data = filter(ddd, profession == p), 
+    x=year, y=suisse, width="100%", height="250px", decimals = 1,
+    left = 40, right = 70, bottom = 30, buffer = 2, top = 30, linked = F, title = p, show_rollover_text = F) %>%
+  mjs_line() %>%
+  mjs_add_line(etranger) %>% 
+  mjs_add_line(frontalier) %>% 
+  mjs_axis_y(min_y = 0, max_y = max(dd$perc, na.rm = T)) %>% 
+  mjs_axis_x(xax_count = 4) %>%
+  mjs_add_legend(c("Suisses", "étrangers", "frontaliers"), inline=TRUE) %>% 
+  mjs_labs(x_label="Année") 
+})
+
+r2 <- mjs_grid(p2, ncol = 3, nrow = 3, widths=c(rep(0.32, 3)))
+
+# hack to make it responsive !!
+r2$sizingPolicy$browser$padding <- 1
+r2$sizingPolicy$browser$defaultWidth <- "100%"
+save_html(r2, file="jobs_byNat_sm.html", libdir = "js")
+
+
+
+
+### Jobs overall ##
+jobs <- data %>% filter(nationalité != "frontalier") %>% 
+  group_by(profession, année) %>% dplyr::summarise(tot = sum(valeur, na.rm =T)) %>% ungroup ()
+
+jobs %>% ggplot(aes(x = année, y = tot)) + geom_line(size = 0.5, alpha = 0.8) + facet_wrap(~ profession, ncol = 3, scales = "free_x") +  theme_swi()
+
+# reduce resolution to have it by year
+jobs %<>% group_by(profession) %>% mutate(year = as.numeric(format(année, "%Y")))
+jobsy <- jobs %>% group_by(profession, year) %>% dplyr::summarise(tot = last(tot))  %>% ungroup()                          
+
+jobsy <- jobsy %>% group_by(year) %>% mutate(yearlytot = sum(tot, na.rm = T)) %>% 
+  ungroup %>% group_by(year) %>%  mutate(perc = (tot/yearlytot) * 100) %>% ungroup()
+
+jobsy  %>% ggplot(aes(x = year, y = perc)) + geom_line(size = 0.5, alpha = 0.8) + facet_wrap(~ profession, ncol = 3, scales = "free_x") +  theme_swi()
+
+#jobsy <- jobsy %>% rename(longytotalname = tot)
+
+colors <- swi_rpal[1:length(unique(jobsy$profession))]
+names(colors) <- unique(jobsy$profession)
+
+txt <- c("year", "tot")
+descr <- "Ingénieurs, infirmers, journalistes, juristes, psychologues"
+
+
+plots <- lapply(unique(jobsy$profession), function(p) {
+  mjs_plot(data = filter(jobsy, profession == p), 
+    x = txt[1], y = txt[2], width="100%", height="250px", decimals = 1, description = descr,
+    left = 50, right = 20, bottom = 30, buffer = 2, top = 60, linked = F, title = p) %>%
+  mjs_line(area = TRUE, color = unname(colors[p])) %>%
+  mjs_axis_y(min_y = 0, max_y = max(jobsy$tot, na.rm = T)) %>% 
+  mjs_axis_x(xax_count = 4) %>%
+  mjs_labs(x_label="")
+})
+
+r <- mjs_grid(plots, ncol = 3, nrow = 3, widths=c(rep(0.32, 3)))
+
+# hack to make it responsive !!
+r$sizingPolicy$browser$padding <- 1
+r$sizingPolicy$browser$defaultWidth <- "100%"
+
+save_html(fluidPage(
+  tags$h1("Cloud and Wireframe from Lattice")
+   ,fluidRow(style = "height:100%; overflow:hidden;"
+  ,r
+  )
+), file="jobs_all_sm_test.html")
+
+
+save_html(r, file="jobs_all_sm.html", libdir = "js")
+swi_widget(widget.html = "jobs_all_sm.html", output.html = "jobs_all_sm_swi.html")
+
+
+save_html(fluidPage(
+  tags$h1("Cloud and Wireframe from Lattice")
+   ,fluidRow(lapply(1:length(plots), function(i) column(4, plots[[i]]))
+  )
+), file="jobs_all_sm_test2.html")
+
+
+#html_print(grid, background="#dfdada;")
+save_html(grid, "jobs_all_sm_test2.html", background="#dfdada;")
+  
+
+```
+
+
